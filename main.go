@@ -57,9 +57,11 @@ const viewerHTML = `<!DOCTYPE html>
     .overlay-text { position:absolute; bottom:12px; left:12px; background:rgba(0,0,0,0.7); padding:4px 8px; font-size:11px; border-radius:4px; border:1px solid #333; }
     .status-bar { padding:12px 16px; font-size:12px; color:#888; text-align:center; border-top:1px solid #222; background:#0a0a0a; }
     .controls { padding:12px 16px; display:flex; gap:8px; background:#111; border-top:1px solid #222; }
-    button { flex:1; padding:12px; border:none; border-radius:6px; font-weight:700; font-size:12px; cursor:pointer; text-transform:uppercase; transition:all 0.2s; }
+    button { flex:1; padding:12px; border:none; border-radius:6px; font-weight:700; font-size:12px; cursor:pointer; text-transform:uppercase; transition:all 0.2s; user-select:none; -webkit-user-select:none; }
     .btn-audio { background:#ff003c; color:#fff; }
     .btn-audio:active { transform:scale(0.98); opacity:0.8; }
+    .btn-talk { background:#0055ff; color:#fff; }
+    .btn-talk.talking { background:#00ff41; color:#000; box-shadow:0 0 15px #00ff41; }
   </style>
 </head>
 <body>
@@ -67,22 +69,27 @@ const viewerHTML = `<!DOCTYPE html>
     <div class="header">
       <div class="brand">
         <span class="dot"></span>
-        <span>SNOOPTRAP REMOTE SURVEILLANCE</span>
+        <span>SNOOPTRAP LIVE INTERCOM</span>
       </div>
       <div id="liveBadge" class="badge">CONNECTING...</div>
     </div>
 
     <div class="video-container">
-      <video id="remoteVideo" autoplay playsinline controls></video>
+      <img id="remoteVideo" src="" alt="Live Surveillance Feed" style="width:100%;height:100%;object-fit:cover;display:none;" />
+      <div id="callingPlaceholder" style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:#888;font-size:12px;gap:8px;">
+        <span class="dot"></span>
+        <span id="placeholderText">Menghubungkan ke live stream laptop...</span>
+      </div>
       <div class="overlay-text" id="fpsText">CAM: READY</div>
     </div>
 
     <div class="status-bar" id="statusText">
-      Menghubungkan ke kamera & mic laptop Anda via WebRTC P2P...
+      Menghubungkan ke relay server WebSocket...
     </div>
 
     <div class="controls">
-      <button class="btn-audio" onclick="unmuteAudio()">🔊 AKTIFKAN SUARA MIC LAPTOP</button>
+      <button id="btnListen" class="btn-audio" onclick="toggleListen()">🔊 DENGARKAN LAPTOP</button>
+      <button id="btnTalk" class="btn-talk" onmousedown="startTalk()" onmouseup="stopTalk()" ontouchstart="startTalk(event)" ontouchend="stopTalk(event)">🎙️ TAHAN BICARA</button>
     </div>
   </div>
 
@@ -93,14 +100,75 @@ const viewerHTML = `<!DOCTYPE html>
     const liveBadge = document.getElementById('liveBadge');
     const remoteVideo = document.getElementById('remoteVideo');
     const fpsText = document.getElementById('fpsText');
+    const callingPlaceholder = document.getElementById('callingPlaceholder');
+    const placeholderText = document.getElementById('placeholderText');
 
-    function unmuteAudio() {
-      remoteVideo.muted = false;
-      remoteVideo.play().then(() => {
-        statusText.innerText = "Audio diaktifkan (Mendengarkan ruangan laptop)";
-      }).catch(e => {
-        statusText.innerText = "Audio tap error: " + e;
-      });
+    let ws = null;
+    let isListening = false;
+    let talkRecorder = null;
+    let talkStream = null;
+
+    function toggleListen() {
+      isListening = !isListening;
+      const btn = document.getElementById('btnListen');
+      if (isListening) {
+        btn.innerText = "🔇 BISUKAN SUARA";
+        btn.style.background = "#222";
+        statusText.innerText = "Mendengarkan suara mikrofon laptop...";
+      } else {
+        btn.innerText = "🔊 DENGARKAN LAPTOP";
+        btn.style.background = "#ff003c";
+        statusText.innerText = "Suara laptop dibisukan.";
+      }
+    }
+
+    async function startTalk(e) {
+      if (e) e.preventDefault();
+      const btn = document.getElementById('btnTalk');
+      btn.classList.add('talking');
+      btn.innerText = "🔴 SEDANG BICARA...";
+      statusText.innerText = "Suara Anda sedang diputar di speaker laptop!";
+
+      try {
+        if (!talkStream) {
+          talkStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        }
+        let mime = 'audio/webm';
+        if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported('audio/mp4')) {
+          mime = 'audio/mp4';
+        }
+        talkRecorder = new MediaRecorder(talkStream, { mimeType: mime, audioBitsPerSecond: 64000 });
+        talkRecorder.ondataavailable = (ev) => {
+          if (ev.data && ev.data.size > 0 && ws && ws.readyState === WebSocket.OPEN) {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              const b64 = (reader.result).split(',')[1];
+              if (b64) {
+                ws.send(JSON.stringify({ type: 'intercom_speak', data: b64, mime: mime }));
+              }
+            };
+            reader.readAsDataURL(ev.data);
+          }
+        };
+        talkRecorder.start(250);
+      } catch (err) {
+        btn.classList.remove('talking');
+        btn.innerText = "🎙️ TAHAN BICARA";
+        statusText.innerText = "Izinkan akses mic HP untuk berbicara ke laptop.";
+      }
+    }
+
+    function stopTalk(e) {
+      if (e) e.preventDefault();
+      const btn = document.getElementById('btnTalk');
+      btn.classList.remove('talking');
+      btn.innerText = "🎙️ TAHAN BICARA";
+      statusText.innerText = "Pesan suara terkirim.";
+
+      if (talkRecorder && talkRecorder.state === 'recording') {
+        talkRecorder.stop();
+        talkRecorder = null;
+      }
     }
 
     if (!room) {
@@ -108,52 +176,65 @@ const viewerHTML = `<!DOCTYPE html>
       liveBadge.innerText = "ROOM MISSING";
       liveBadge.style.color = "#ff003c";
     } else {
-      const peer = new Peer({
-        config: {
-          iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun2.l.google.com:19302' },
-            { urls: 'stun:stun3.l.google.com:19302' },
-            { urls: 'stun:stun4.l.google.com:19302' }
-          ]
-        }
-      });
+      let frameCount = 0;
+      let lastFpsTime = Date.now();
 
-      peer.on('open', (id) => {
-        statusText.innerText = "Tersambung ke Relay. Memanggil kamera laptop (" + room + ")...";
-        liveBadge.innerText = "CALLING...";
+      function connectWS() {
+        const loc = window.location;
+        const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = proto + '//' + loc.host + '/ws?room=' + encodeURIComponent(room) + '&role=viewer';
 
-        // Call the laptop's PeerJS room
-        const call = peer.call(room, new MediaStream());
+        statusText.innerText = "Menghubungkan ke Relay WebSocket...";
+        liveBadge.innerText = "CONNECTING...";
 
-        call.on('stream', (stream) => {
-          remoteVideo.srcObject = stream;
-          remoteVideo.play().catch(()=>{});
-          liveBadge.innerText = "LIVE (30 FPS)";
-          liveBadge.style.color = "#00ff41";
-          fpsText.innerText = "FPS: 30 | AUDIO: LIVE";
-          statusText.innerText = "Siaran langsung aktif! Kamera dan mikrofon laptop sedang menyiarkan siaran real-time.";
-        });
+        ws = new WebSocket(wsUrl);
 
-        call.on('close', () => {
-          liveBadge.innerText = "DISCONNECTED";
+        ws.onopen = () => {
+          placeholderText.innerText = "Relay terhubung. Menunggu feed kamera laptop...";
+          statusText.innerText = "Terhubung ke Relay. Menunggu feed kamera laptop...";
+          liveBadge.innerText = "WAITING FEED";
+          liveBadge.style.color = "#ffbb00";
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'frame' && msg.data) {
+              remoteVideo.style.display = 'block';
+              callingPlaceholder.style.display = 'none';
+              remoteVideo.src = msg.data;
+
+              frameCount++;
+              const now = Date.now();
+              if (now - lastFpsTime >= 1000) {
+                fpsText.innerText = 'FPS: ' + frameCount + ' | LIVE FEED';
+                frameCount = 0;
+                lastFpsTime = now;
+              }
+
+              liveBadge.innerText = "LIVE (ONLINE)";
+              liveBadge.style.color = "#00ff41";
+              statusText.innerText = "Siaran langsung aktif! Kamera laptop sedang menyiarkan secara real-time.";
+            } else if (msg.type === 'audio_out' && isListening && msg.data) {
+              const audioElem = new Audio('data:' + (msg.mime || 'audio/webm') + ';base64,' + msg.data);
+              audioElem.play().catch(()=>{});
+            }
+          } catch (err) {}
+        };
+
+        ws.onerror = (err) => {
+          statusText.innerText = "Relay WebSocket error.";
+        };
+
+        ws.onclose = () => {
+          liveBadge.innerText = "RECONNECTING";
           liveBadge.style.color = "#ff003c";
-          statusText.innerText = "Panggilan live feed selesai / laptop disarm.";
-        });
+          statusText.innerText = "Koneksi terputus. Mencoba ulang dalam 2 detik...";
+          setTimeout(connectWS, 2000);
+        };
+      }
 
-        call.on('error', (err) => {
-          statusText.innerText = "Koneksi terputus: " + err;
-        });
-      });
-
-      peer.on('error', (err) => {
-        if (err.type === 'peer-unavailable') {
-          statusText.innerText = "Laptop sedang offline atau feed belum dimulai. Kirim /stream di Telegram untuk memicu feed.";
-        } else {
-          statusText.innerText = "PeerJS Notice: " + err.type + " - " + err.message;
-        }
-      });
+      connectWS();
     }
   </script>
 </body>
