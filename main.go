@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -26,9 +27,10 @@ type Client struct {
 }
 
 type Room struct {
-	host    *Client
-	viewers map[*Client]bool
-	mu      sync.RWMutex
+	host      *Client
+	viewers   map[*Client]bool
+	lastFrame []byte
+	mu        sync.RWMutex
 }
 
 var (
@@ -41,8 +43,7 @@ const viewerHTML = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>SnoopTrap // Remote Surveillance Feed</title>
-  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <title>SnoopTrap // Live Surveillance & Intercom</title>
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     body { background:#050505; color:#fff; font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:12px; }
@@ -309,6 +310,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		room.host = client
 	} else {
 		room.viewers[client] = true
+		if len(room.lastFrame) > 0 {
+			_ = client.conn.WriteMessage(websocket.TextMessage, room.lastFrame)
+		}
 	}
 	room.mu.Unlock()
 
@@ -322,6 +326,16 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		room.mu.Unlock()
 	}()
 
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	go func() {
+		for range ticker.C {
+			if err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second)); err != nil {
+				return
+			}
+		}
+	}()
+
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
@@ -329,17 +343,27 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Relay signal between host and viewers
-		room.mu.RLock()
 		if client.isHost {
+			if bytes.Contains(msg, []byte(`"type":"frame"`)) || bytes.Contains(msg, []byte(`"type": "frame"`)) {
+				room.mu.Lock()
+				room.lastFrame = msg
+				room.mu.Unlock()
+			}
+
 			// Broadcast signal from host laptop to all connected phone viewers
+			room.mu.RLock()
 			for viewer := range room.viewers {
 				_ = viewer.conn.WriteMessage(websocket.TextMessage, msg)
 			}
-		} else if room.host != nil {
+			room.mu.RUnlock()
+		} else {
 			// Forward signal from viewer to host laptop
-			_ = room.host.conn.WriteMessage(websocket.TextMessage, msg)
+			room.mu.RLock()
+			if room.host != nil {
+				_ = room.host.conn.WriteMessage(websocket.TextMessage, msg)
+			}
+			room.mu.RUnlock()
 		}
-		room.mu.RUnlock()
 	}
 }
 
