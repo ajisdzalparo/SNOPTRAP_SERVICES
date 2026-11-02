@@ -106,13 +106,61 @@ const viewerHTML = `<!DOCTYPE html>
 
     let ws = null;
     let isListening = false;
-    let talkRecorder = null;
     let talkStream = null;
+    const PCM_RATE = 16000;
+
+    // Playback of laptop PCM (raw samples via Web Audio -> no codec, works on iPhone Safari)
+    let playCtx = null;
+    let playNextTime = 0;
+    // Capture of phone mic as PCM for talk-back
+    let talkCtx = null;
+    let talkNode = null;
+
+    function b64ToFloat32(b64) {
+      const bin = atob(b64);
+      const len = bin.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+      const pcm = new Int16Array(bytes.buffer, 0, Math.floor(len / 2));
+      const f32 = new Float32Array(pcm.length);
+      for (let i = 0; i < pcm.length; i++) f32[i] = pcm[i] / 32768;
+      return f32;
+    }
+
+    function int16ToB64(pcm) {
+      const bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+      let bin = '';
+      const CHUNK = 0x8000;
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+      }
+      return btoa(bin);
+    }
+
+    function playPcm(b64, rate) {
+      if (!playCtx) return;
+      const f32 = b64ToFloat32(b64);
+      if (f32.length === 0) return;
+      const buf = playCtx.createBuffer(1, f32.length, rate || PCM_RATE);
+      buf.getChannelData(0).set(f32);
+      const src = playCtx.createBufferSource();
+      src.buffer = buf;
+      src.connect(playCtx.destination);
+      const now = playCtx.currentTime;
+      if (playNextTime < now) playNextTime = now + 0.08;
+      src.start(playNextTime);
+      playNextTime += buf.duration;
+    }
 
     function toggleListen() {
       isListening = !isListening;
       const btn = document.getElementById('btnListen');
       if (isListening) {
+        // iPhone Safari needs the AudioContext created/resumed inside a user tap
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!playCtx) playCtx = new AudioCtx();
+        if (playCtx.resume) playCtx.resume();
+        playNextTime = 0;
         btn.innerText = "🔇 BISUKAN SUARA";
         btn.style.background = "#222";
         statusText.innerText = "Mendengarkan suara mikrofon laptop...";
@@ -134,24 +182,29 @@ const viewerHTML = `<!DOCTYPE html>
         if (!talkStream) {
           talkStream = await navigator.mediaDevices.getUserMedia({ audio: true });
         }
-        let mime = 'audio/webm';
-        if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported('audio/mp4')) {
-          mime = 'audio/mp4';
-        }
-        talkRecorder = new MediaRecorder(talkStream, { mimeType: mime, audioBitsPerSecond: 64000 });
-        talkRecorder.ondataavailable = (ev) => {
-          if (ev.data && ev.data.size > 0 && ws && ws.readyState === WebSocket.OPEN) {
-            const reader = new FileReader();
-            reader.onloadend = () => {
-              const b64 = (reader.result).split(',')[1];
-              if (b64) {
-                ws.send(JSON.stringify({ type: 'intercom_speak', data: b64, mime: mime }));
-              }
-            };
-            reader.readAsDataURL(ev.data);
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!talkCtx) talkCtx = new AudioCtx();
+        if (talkCtx.resume) talkCtx.resume();
+        const srcRate = talkCtx.sampleRate;
+        const source = talkCtx.createMediaStreamSource(talkStream);
+        talkNode = talkCtx.createScriptProcessor(4096, 1, 1);
+        talkNode.onaudioprocess = (ev) => {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          const input = ev.inputBuffer.getChannelData(0);
+          const ratio = srcRate / PCM_RATE;
+          const outLen = Math.floor(input.length / ratio);
+          const pcm = new Int16Array(outLen);
+          for (let i = 0; i < outLen; i++) {
+            const s = input[Math.floor(i * ratio)];
+            pcm[i] = Math.max(-32768, Math.min(32767, s * 32767));
           }
+          ws.send(JSON.stringify({ type: 'intercom_speak', pcm: int16ToB64(pcm), rate: PCM_RATE }));
         };
-        talkRecorder.start(250);
+        source.connect(talkNode);
+        const mute = talkCtx.createGain();
+        mute.gain.value = 0;
+        talkNode.connect(mute);
+        mute.connect(talkCtx.destination);
       } catch (err) {
         btn.classList.remove('talking');
         btn.innerText = "🎙️ TAHAN BICARA";
@@ -166,9 +219,10 @@ const viewerHTML = `<!DOCTYPE html>
       btn.innerText = "🎙️ TAHAN BICARA";
       statusText.innerText = "Pesan suara terkirim.";
 
-      if (talkRecorder && talkRecorder.state === 'recording') {
-        talkRecorder.stop();
-        talkRecorder = null;
+      if (talkNode) {
+        try { talkNode.disconnect(); } catch (e) {}
+        talkNode.onaudioprocess = null;
+        talkNode = null;
       }
     }
 
@@ -216,9 +270,8 @@ const viewerHTML = `<!DOCTYPE html>
               liveBadge.innerText = "LIVE (ONLINE)";
               liveBadge.style.color = "#00ff41";
               statusText.innerText = "Siaran langsung aktif! Kamera laptop sedang menyiarkan secara real-time.";
-            } else if (msg.type === 'audio_out' && isListening && msg.data) {
-              const audioElem = new Audio('data:' + (msg.mime || 'audio/webm') + ';base64,' + msg.data);
-              audioElem.play().catch(()=>{});
+            } else if (msg.type === 'audio_out' && isListening && msg.pcm) {
+              playPcm(msg.pcm, msg.rate || PCM_RATE);
             }
           } catch (err) {}
         };
