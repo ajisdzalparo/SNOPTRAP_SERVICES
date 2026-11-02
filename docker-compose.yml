@@ -44,7 +44,8 @@ services:
       - --denied-peer-ip=169.254.0.0-169.254.255.255
       - --denied-peer-ip=172.16.0.0-172.31.255.255
       - --denied-peer-ip=192.168.0.0-192.168.255.255
-      - --denied-peer-ip=100.64.0.0-100.127.255.255
+      # NOTE: 100.64.0.0/10 (CGNAT) intentionally NOT denied — mobile carriers use it,
+      # so denying it would block legitimate phone peers on cellular data.
       - --total-quota=50
       - --log-file=stdout
 
