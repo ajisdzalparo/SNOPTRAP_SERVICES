@@ -36,6 +36,16 @@ services:
       - --no-dtls
       - --no-cli
       - --no-multicast-peers
+      # Hardening: never relay to private/internal ranges (blocks SSRF / LAN abuse),
+      # and cap concurrent allocations so a leaked credential can't run up huge bandwidth.
+      - --denied-peer-ip=0.0.0.0-0.255.255.255
+      - --denied-peer-ip=10.0.0.0-10.255.255.255
+      - --denied-peer-ip=127.0.0.0-127.255.255.255
+      - --denied-peer-ip=169.254.0.0-169.254.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.0.0-192.168.255.255
+      - --denied-peer-ip=100.64.0.0-100.127.255.255
+      - --total-quota=50
       - --log-file=stdout
 
 # Join Caddy's Docker network so the reverse proxy can resolve `snooptrap-stream:8080`.
