@@ -7,4 +7,14 @@ services:
       - "8080:8080"
     environment:
       - PORT=8080
+    networks:
+      - default
+      - caddy
 
+# Join Caddy's Docker network so the reverse proxy can resolve `snooptrap-stream:8080`.
+# This must match the network the Caddy container is on (here: caddy_net). Verify with:
+#   docker inspect caddy -f '{{range $k,$v := .NetworkSettings.Networks}}{{println $k}}{{end}}'
+networks:
+  caddy:
+    external: true
+    name: caddy_net
