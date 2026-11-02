@@ -7,9 +7,36 @@ services:
       - "8080:8080"
     environment:
       - PORT=8080
+      # TURN config injected into the viewer page (values from .env, never committed).
+      - TURN_URL=${TURN_URL}
+      - TURN_USER=${TURN_USER}
+      - TURN_PASS=${TURN_PASS}
     networks:
       - default
       - caddy
+
+  # coturn: WebRTC TURN relay so laptop<->phone media works across strict/mobile NAT.
+  # Uses host networking because TURN needs its listening port + a UDP relay range.
+  # Open these on the VPS/cloud firewall: 3478/tcp, 3478/udp, 49160-49200/udp.
+  coturn:
+    image: coturn/coturn:4.6.2
+    container_name: coturn
+    restart: always
+    network_mode: host
+    command:
+      - -n
+      - --realm=stream-snooptrap.ajisdzalparo.com
+      - --listening-port=3478
+      - --min-port=49160
+      - --max-port=49200
+      - --external-ip=${TURN_EXTERNAL_IP}
+      - --user=${TURN_USER}:${TURN_PASS}
+      - --lt-cred-mech
+      - --no-tls
+      - --no-dtls
+      - --no-cli
+      - --no-multicast-peers
+      - --log-file=stdout
 
 # Join Caddy's Docker network so the reverse proxy can resolve `snooptrap-stream:8080`.
 # This must match the network the Caddy container is on (here: caddy_net). Verify with:

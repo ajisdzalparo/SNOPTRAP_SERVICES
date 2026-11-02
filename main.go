@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -120,13 +121,9 @@ const viewerHTML = `<!DOCTYPE html>
       // ICE servers: Google STUN for NAT discovery. Add your TURN server here if P2P
       // fails on strict/mobile NAT, e.g.
       //   { urls: 'turn:YOUR_VPS_IP:3478', username: 'user', credential: 'pass' }
-      const iceServers = [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:stun3.l.google.com:19302' },
-        { urls: 'stun:stun4.l.google.com:19302' }
-      ];
+      // Injected server-side from env (STUN + TURN relay if TURN_URL is set). TURN creds
+      // live in the VPS .env, never in source.
+      const iceServers = __ICE_SERVERS__;
 
       let peer = null;
       let connected = false;
@@ -201,16 +198,39 @@ const viewerHTML = `<!DOCTYPE html>
 </body>
 </html>`
 
+// iceServersJSON builds the WebRTC ICE server list: Google STUN always, plus the VPS TURN
+// relay when TURN_URL/TURN_USER are set in the environment (.env). Credentials come from
+// env, never from source. TURN is what makes media flow when direct P2P fails behind NAT.
+func iceServersJSON() string {
+	servers := []map[string]interface{}{
+		{"urls": "stun:stun.l.google.com:19302"},
+		{"urls": "stun:stun1.l.google.com:19302"},
+	}
+	turnURL := os.Getenv("TURN_URL")
+	turnUser := os.Getenv("TURN_USER")
+	turnPass := os.Getenv("TURN_PASS")
+	if turnURL != "" && turnUser != "" {
+		servers = append(servers,
+			map[string]interface{}{"urls": turnURL + "?transport=udp", "username": turnUser, "credential": turnPass},
+			map[string]interface{}{"urls": turnURL + "?transport=tcp", "username": turnUser, "credential": turnPass},
+		)
+	}
+	b, _ := json.Marshal(servers)
+	return string(b)
+}
+
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	// 1. Web Viewer Endpoint: Serves HTML5 live surveillance player for mobile & desktop
+	// 1. Web Viewer Endpoint: Serves HTML5 live surveillance player for mobile & desktop.
+	// ICE servers (STUN + optional TURN from env) are injected into the page per request.
 	http.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, viewerHTML)
+		html := strings.Replace(viewerHTML, "__ICE_SERVERS__", iceServersJSON(), 1)
+		fmt.Fprint(w, html)
 	})
 
 	// 2. Health check endpoint (for VPS monitoring & uptime checks)
